@@ -81,8 +81,9 @@ func bytesToUUID(data []byte) (ret uuid.UUID) {
 // The structure definition for a user record
 type User struct {
 	Username string
-	Salt []byte
 	PasswordHash []byte
+	PrivateKey userlib.PKEDecKey
+	SignKey userlib.DSSignKey
 
 	// You can add other fields here if you want...
 	// Note for JSON to marshal/unmarshal, the fields need to
@@ -109,15 +110,38 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	userdataptr = &userdata
 
 	userdata.Username = username
-	userUuid,_ := uuid.FromBytes([]byte(username))
+	salt := userlib.RandomBytes(16)
 
-	userdata.Salt = userlib.RandomBytes(32)
-	userdata.PasswordHash = userlib.Argon2Key([]byte(password), userdata.Salt, 256)
+	//generate 32 byte key from password
+	keyString := userlib.Argon2Key([]byte(password), salt, 32)
+	symmetricKey := keyString[:16]
+	hmacKey := keyString[16:]
 
-	//encrypt and store userdata
+	//generate user's key pairs
+	publicKey,privateKey,_ := userlib.PKEKeyGen()
+	signKey, verifyKey,_ := userlib.DSKeyGen()
+
+	//write private Keys to userdata
+	userdata.PrivateKey = privateKey
+	userdata.SignKey = signKey
+
+	//store public keys to keystore
+	userlib.KeystoreSet(username+"pke", publicKey)
+	userlib.KeystoreSet(username+"ds", verifyKey)
+
+	//encrypt userdata
 	jsonUserdata,_ := json.Marshal(userdata)
-	encrypted := userlib.SymEnc([]byte(password), userlib.RandomBytes(8), jsonUserdata)
-	userlib.DatastoreSet(userUuid, encrypted)
+	encrypted := userlib.SymEnc(symmetricKey, userlib.RandomBytes(16), jsonUserdata)
+	ciphertext := append(salt, encrypted...)
+
+	//hmac encrypted data
+	hmac,_ := userlib.HMACEval(hmacKey, encrypted)
+	securedData := append(hmac, ciphertext...)
+
+	//store secured data to datastore
+	//userUuid := bytesToUUID([]byte(username+password))
+	userUuid,_ := uuid.FromBytes([]byte(username+password))
+	userlib.DatastoreSet(userUuid, securedData)
 
 	return userdataptr, nil
 }
@@ -129,16 +153,30 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
 	userdataptr = &userdata
 
-	userUuid,_ := uuid.FromBytes([]byte(username))
-	jsonUserdata,fileExist := userlib.DatastoreGet(userUuid)
+	//retrieve secured data from datastore
+	userUuid,_ := uuid.FromBytes([]byte(username+password))
+	securedData,fileExist := userlib.DatastoreGet(userUuid)
 	if !fileExist {
-		return userdataptr, errors.New("file does not exist")
+		return userdataptr, errors.New("invalid username/password")
 	}
-	json.Unmarshal(jsonUserdata, userdataptr)
-	passwordHash := userlib.Argon2Key([]byte(password), userdata.Salt, 256)
-	if hex.EncodeToString(passwordHash) != hex.EncodeToString(userdata.PasswordHash) {
-		return nil, errors.New("invalid password")
+	hmac := securedData[:16]
+	salt := securedData[16:32]
+	ciphertext := securedData[32:]
+
+	//generate 32 byte key from password
+	keyString := userlib.Argon2Key([]byte(password), salt, 32)
+	symmetricKey := keyString[:16]
+	hmacKey := keyString[16:]
+
+	//check if file is corrupted or tampered
+	receivedHmac,_ := userlib.HMACEval(hmacKey, ciphertext)
+	if userlib.HMACEqual(hmac, receivedHmac) {
+		return nil, errors.New("userdata corrupted")
 	}
+
+	//decrypt encrypted user data
+	decrypted := userlib.SymDec(symmetricKey, ciphertext)
+	json.Unmarshal(decrypted, userdataptr)
 
 	return userdataptr, nil
 }
@@ -147,6 +185,8 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 //
 // The name and length of the file should NOT be revealed to the datastore!
 func (userdata *User) StoreFile(filename string, data []byte) {
+	fileUuid := bytesToUUID(userlib.H)
+
 	return
 }
 
