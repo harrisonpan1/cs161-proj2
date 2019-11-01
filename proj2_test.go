@@ -36,6 +36,13 @@ func TestInit(t *testing.T) {
 	// You probably want many more tests here.
 }
 
+func TestPassword(t *testing.T) {
+	_, err := GetUser("alice", "fuba1r")
+	if err != nil {
+		t.Error("Failed to reload user", err)
+		return
+	}
+}
 
 func TestStorage(t *testing.T) {
 	// And some more tests, because

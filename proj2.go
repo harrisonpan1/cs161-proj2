@@ -81,6 +81,8 @@ func bytesToUUID(data []byte) (ret uuid.UUID) {
 // The structure definition for a user record
 type User struct {
 	Username string
+	Salt []byte
+	PasswordHash []byte
 
 	// You can add other fields here if you want...
 	// Note for JSON to marshal/unmarshal, the fields need to
@@ -106,7 +108,18 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
 	userdataptr = &userdata
 
-	return &userdata, nil
+	userdata.Username = username
+	userUuid,_ := uuid.FromBytes([]byte(username))
+
+	userdata.Salt = userlib.RandomBytes(32)
+	userdata.PasswordHash = userlib.Argon2Key([]byte(password), userdata.Salt, 256)
+
+	//encrypt and store userdata
+	jsonUserdata,_ := json.Marshal(userdata)
+	encrypted := userlib.SymEnc([]byte(password), userlib.RandomBytes(8), jsonUserdata)
+	userlib.DatastoreSet(userUuid, encrypted)
+
+	return userdataptr, nil
 }
 
 // This fetches the user information from the Datastore.  It should
@@ -115,6 +128,17 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 func GetUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
 	userdataptr = &userdata
+
+	userUuid,_ := uuid.FromBytes([]byte(username))
+	jsonUserdata,fileExist := userlib.DatastoreGet(userUuid)
+	if !fileExist {
+		return userdataptr, errors.New("file does not exist")
+	}
+	json.Unmarshal(jsonUserdata, userdataptr)
+	passwordHash := userlib.Argon2Key([]byte(password), userdata.Salt, 256)
+	if hex.EncodeToString(passwordHash) != hex.EncodeToString(userdata.PasswordHash) {
+		return nil, errors.New("invalid password")
+	}
 
 	return userdataptr, nil
 }
