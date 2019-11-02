@@ -4,15 +4,15 @@ package proj2
 // imports it will break the autograder, and we will be Very Upset.
 
 import (
-	"testing"
-	"reflect"
-	"github.com/cs161-staff/userlib"
-	_ "encoding/json"
 	_ "encoding/hex"
-	_ "github.com/google/uuid"
-	_ "strings"
+	_ "encoding/json"
 	_ "errors"
+	"github.com/cs161-staff/userlib"
+	_ "github.com/google/uuid"
+	"reflect"
 	_ "strconv"
+	_ "strings"
+	"testing"
 )
 
 
@@ -34,14 +34,6 @@ func TestInit(t *testing.T) {
 	// If you want to comment the line above,
 	// write _ = u here to make the compiler happy
 	// You probably want many more tests here.
-}
-
-func TestPassword(t *testing.T) {
-	_, err := GetUser("alice", "fuba1r")
-	if err != nil {
-		t.Error("Failed to reload user", err)
-		return
-	}
 }
 
 func TestStorage(t *testing.T) {
@@ -99,7 +91,6 @@ func TestShare(t *testing.T) {
 		t.Error("Failed to receive the share message", err)
 		return
 	}
-
 	v2, err = u2.LoadFile("file2")
 	if err != nil {
 		t.Error("Failed to download the file after sharing", err)
