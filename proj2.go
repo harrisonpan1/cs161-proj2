@@ -88,17 +88,32 @@ type User struct {
 	PrivateKey userlib.PKEDecKey
 	SignKey userlib.DSSignKey
 	Uuid uuid.UUID
-	Files map[string]File
+	Files map[string]UserFile //maps filename to fsr uuid and fsrkey uuid
 
 	// You can add other fields here if you want...
 	// Note for JSON to marshal/unmarshal, the fields need to
 	// be public (start with a capital letter)
 }
 
-type File struct {
-	Uuid uuid.UUID
-	SymmeticKey []byte
-	HmacKey []byte
+type UserFile struct {
+	FsrUuid uuid.UUID
+	FsrKeyUuid uuid.UUID
+}
+
+//type File struct {
+//	Uuid uuid.UUID
+//	SymmetricKey []byte
+//	HmacKey []byte
+//}
+
+type FileData struct {
+	Shares []Share
+	Data []byte
+}
+
+type Share struct {
+	Sender string
+	Recipient string
 }
 
 type SharingRecord struct {
@@ -127,7 +142,7 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
 	userdataptr = &userdata
 
-	userdata.Files = make(map[string]File)
+	userdata.Files = make(map[string]UserFile)
 	userdata.Username = username
 	userdata.Salt = userlib.RandomBytes(16)
 
@@ -215,25 +230,43 @@ func (userdata *User) StoreFile(filename string, data []byte) {
 	fileUuidString := userlib.Argon2Key([]byte(userdata.Username+filename), []byte(""), 16)
 	fileUuid,_ := uuid.FromBytes(fileUuidString)
 
-	//create new key to encrypt file
+	//create new keys to encrypt file
 	keyString,_ := userlib.HMACEval(userlib.RandomBytes(16), data)
 	symmetricKey := keyString[:16]
 	hmacKey := keyString[16:32]
 
+	//create file data
+	var fileData FileData
+	fileData.Shares = make([]Share, 100)
+	fileData.Data = data
+	rawFileData,_ := json.Marshal(fileData)
+
 	//encrypt file data with symmetric key
-	encryptedFile := userlib.SymEnc(symmetricKey, userlib.RandomBytes(16), data)
+	encryptedFile := userlib.SymEnc(symmetricKey, userlib.RandomBytes(16), rawFileData)
 	hmacFile,_ := userlib.HMACEval(hmacKey, encryptedFile)
 	secured := append(hmacFile, encryptedFile...)
 
 	//store file to datastore
 	userlib.DatastoreSet(fileUuid, secured)
 
-	//write file mapping to userdata
-	var file File
-	file.Uuid = fileUuid
-	file.SymmeticKey = symmetricKey
-	file.HmacKey = hmacKey
-	userdata.Files[filename] = file
+	//generate uuid for sharing record
+	srUuidSeed := userlib.Argon2Key([]byte(userdata.Username+userdata.Username+filename),
+		userlib.RandomBytes(16), 32)
+	srUuid,_ := uuid.FromBytes(srUuidSeed[:16])
+	fsrKey := srUuidSeed[16:]
+
+	//create file sharing record
+	userdata.CreateNewFileSharingRecord(srUuid, fileUuid, symmetricKey, hmacKey,fsrKey)
+
+	//create fsrkeyrecord
+	encryptedFsrKeyUuid := uuid.New()
+	userdata.CreateFSRKeyDump(userdata.Username, fsrKey, encryptedFsrKeyUuid)
+
+	//update files in userdata
+	var userFile UserFile
+	userFile.FsrKeyUuid = encryptedFsrKeyUuid
+	userFile.FsrUuid = srUuid
+	userdata.Files[filename] = userFile
 
 	//encrypt userdata
 	jsonUserdata,_ := json.Marshal(userdata)
@@ -246,6 +279,7 @@ func (userdata *User) StoreFile(filename string, data []byte) {
 
 	//store secured data to datastore
 	userlib.DatastoreSet(userdata.Uuid, securedData)
+
 	return
 }
 
@@ -265,22 +299,47 @@ func (userdata *User) AppendFile(filename string, data []byte) (err error) {
 func (userdata *User) LoadFile(filename string) (data []byte, err error) {
 
 	//retrieve file information from filename
-	file := userdata.Files[filename]
-	fileUuid := file.Uuid
+	userFile := userdata.Files[filename]
+	fsrKeyUuid := userFile.FsrKeyUuid
+	fsrUuid := userFile.FsrUuid
 
-	//retrieve secured file from datastore
-	securedFile,_ := userlib.DatastoreGet(fileUuid)
-	hmac := securedFile[:64]
-	encryptedData := securedFile[64:]
+	//retrieve encrypted fsr key
+	encryptedFsrKey,_ := userlib.DatastoreGet(fsrKeyUuid)
+
+	//decrypt encrypted fsr key
+	fsrKey,_ := userlib.PKEDec(userdata.PrivateKey, encryptedFsrKey)
+
+	//retrieve secured fsr
+	securedFsr,_ := userlib.DatastoreGet(fsrUuid)
+
+	var sharingRecord SharingRecord
+	decryptedSR := userlib.SymDec(fsrKey, securedFsr[64:])
+	json.Unmarshal(decryptedSR, &sharingRecord)
+
+
+	//check sr hmac
+	receivedHmac,_ := userlib.HMACEval(sharingRecord.HmacKey, securedFsr[64:])
+	if !userlib.HMACEqual(securedFsr[:64], receivedHmac){
+		return nil, errors.New("hmac not equal")
+	}
+
+	//retrieve filedata from datastore
+	securedFileData,_ := userlib.DatastoreGet(sharingRecord.FileUuid)
+	encryptedData := securedFileData[64:]
+	hmac := securedFileData[:64]
 
 	//check if file is corrupted
-	receivedHmac,_ := userlib.HMACEval(file.HmacKey, encryptedData)
-	if !userlib.HMACEqual(hmac, receivedHmac) {
-		return nil, errors.New("file corrupted")
+	receivedFileDataHmac,_ := userlib.HMACEval(sharingRecord.FileHmacKey, encryptedData)
+	if !userlib.HMACEqual(hmac, receivedFileDataHmac) {
+		return nil, errors.New("file corruptedlol")
 	}
 
 	//decrypt encrypted file
-	data = userlib.SymDec(file.SymmeticKey, encryptedData)
+	rawFileData := userlib.SymDec(sharingRecord.FileSymmetricKey, encryptedData)
+	var fileData FileData
+	json.Unmarshal(rawFileData, &fileData)
+	data = fileData.Data
+
 	return data, nil
 }
 
@@ -298,42 +357,76 @@ func (userdata *User) LoadFile(filename string) (data []byte, err error) {
 func (userdata *User) ShareFile(filename string, recipient string) (
 	magic_string string, err error) {
 
-	//retrieve file information
-	file := userdata.Files[filename]
+	//retrieve file information from filename
+	userFile := userdata.Files[filename]
+	fsrKeyUuid := userFile.FsrKeyUuid
+	fsrUuid := userFile.FsrUuid
+
+	//retrieve encrypted fsr key
+	encryptedFsrKey,_ := userlib.DatastoreGet(fsrKeyUuid)
+
+	//decrypt encrypted fsr key
+	fsrKey,_ := userlib.PKEDec(userdata.PrivateKey, encryptedFsrKey)
+
+	//retrieve secured fsr
+	securedFsr,_ := userlib.DatastoreGet(fsrUuid)
+	var sharingRecord SharingRecord
+	decryptedSR := userlib.SymDec(fsrKey, securedFsr[64:])
+	json.Unmarshal(decryptedSR, &sharingRecord)
+
+	//check sr hmac
+	receivedHmac,_ := userlib.HMACEval(sharingRecord.HmacKey, securedFsr[64:])
+	if !userlib.HMACEqual(securedFsr[:64], receivedHmac){
+		return "", errors.New("hmac not equal")
+	}
+
+	//retrieve secured file from datastore
+	securedFile,_ := userlib.DatastoreGet(sharingRecord.FileUuid)
+	hmac := securedFile[:64]
+	encryptedData := securedFile[64:]
+
+	//check if file is corrupted
+	receivedFileHmac,_ := userlib.HMACEval(sharingRecord.FileHmacKey, encryptedData)
+	if !userlib.HMACEqual(hmac, receivedFileHmac) {
+		return "", errors.New("file corrupted")
+	}
+
+	//decrypt encrypted file
+	rawFileData := userlib.SymDec(sharingRecord.FileSymmetricKey, encryptedData)
+	var fileData FileData
+	json.Unmarshal(rawFileData, &fileData)
+
+
+	//update shares in file information
+	var share Share
+	share.Recipient = recipient
+	share.Sender = userdata.Username
+	fileData.Shares = append(fileData.Shares, share)
+
+	// store updated file data
+	rawFileData,_ = json.Marshal(fileData)
+
+	//encrypt file data with symmetric key
+	encryptedFile := userlib.SymEnc(sharingRecord.FileSymmetricKey, userlib.RandomBytes(16), rawFileData)
+	hmacFile,_ := userlib.HMACEval(sharingRecord.FileHmacKey, encryptedFile)
+	secured := append(hmacFile, encryptedFile...)
+
+	//store file to datastore
+	userlib.DatastoreSet(sharingRecord.FileUuid, secured)
 
 	//generate uuid for sharing record
 	srUuidSeed := userlib.Argon2Key([]byte(userdata.Username+recipient+filename),
 		userlib.RandomBytes(16), 32)
 	srUuid,_ := uuid.FromBytes(srUuidSeed[:16])
-	fsrKey := srUuidSeed[16:]
+	newFsrKey := srUuidSeed[16:]
 
-	//create a sharing record
-	var sharingRecord SharingRecord
-	sharingRecord.HmacKey = userlib.RandomBytes(16)
-	sharingRecord.FileUuid = file.Uuid
-	sharingRecord.FileSymmetricKey = file.SymmeticKey
-	sharingRecord.FileHmacKey = file.HmacKey
-
-
-	//encrypt sharing record with a random key
-	srJson,_ := json.Marshal(sharingRecord)
-	encryptedFSR := userlib.SymEnc(fsrKey, userlib.RandomBytes(16), srJson)
-
-	//add mac to encrypted sharing record
-	srHmac,_ := userlib.HMACEval(sharingRecord.HmacKey, encryptedFSR)
-	securedSr := append(srHmac, encryptedFSR...)
-
-	//store sharing record to data store
-	userlib.DatastoreSet(srUuid, securedSr)
+	userdata.CreateNewFileSharingRecord(srUuid, sharingRecord.FileUuid, sharingRecord.FileSymmetricKey,
+		sharingRecord.FileHmacKey, newFsrKey)
 
 	//encrypt fsr key and store to datastore
-	recipientPubKey,_ := userlib.KeystoreGet(recipient+"pke")
-	encryptedFsrKey,err1 := userlib.PKEEnc(recipientPubKey, fsrKey)
-	if err1 != nil {
-		return "", err1
-	}
 	encryptedFsrKeyUuid := uuid.New()
-	userlib.DatastoreSet(encryptedFsrKeyUuid, encryptedFsrKey)
+	userdata.CreateFSRKeyDump(recipient, newFsrKey, encryptedFsrKeyUuid)
+
 
 	//generate magic string (sr uiid) and sign with ds
 	encryptedFsrKeyUuidByte,_ := encryptedFsrKeyUuid.MarshalBinary()
@@ -343,6 +436,38 @@ func (userdata *User) ShareFile(filename string, recipient string) (
 	magicByte := append(srDigSig, combined...)
 
 	return hex.EncodeToString(magicByte), nil
+}
+
+func (userdata *User) CreateNewFileSharingRecord(srUuid uuid.UUID, fileUuid uuid.UUID,
+	fileSymKey []byte, fileHmacKey []byte, fsrKey []byte) {
+	//create a sharing record
+	var sharingRecord SharingRecord
+	sharingRecord.HmacKey = userlib.RandomBytes(16)
+	sharingRecord.FileUuid = fileUuid
+	sharingRecord.FileSymmetricKey = fileSymKey
+	sharingRecord.FileHmacKey = fileHmacKey
+
+	//encrypt sharing record with fsr key
+	srJson,_ := json.Marshal(sharingRecord)
+	encryptedFSR := userlib.SymEnc(fsrKey, userlib.RandomBytes(16), srJson)
+
+	//add mac to encrypted sharing record
+	srHmac,_ := userlib.HMACEval(sharingRecord.HmacKey, encryptedFSR)
+	securedSr := append(srHmac, encryptedFSR...)
+
+	//store sharing record to data store
+	userlib.DatastoreSet(srUuid, securedSr)
+}
+
+//encrypts fsr key with recipient's public key and stores to specified location in datastore
+func (userdata *User) CreateFSRKeyDump(recipient string, fsrKey []byte, targetUuid uuid.UUID) (err error){
+	recipientPubKey,_ := userlib.KeystoreGet(recipient+"pke")
+	encryptedFsrKey,err1 := userlib.PKEEnc(recipientPubKey, fsrKey)
+	if err1 != nil {
+		return err1
+	}
+	userlib.DatastoreSet(targetUuid, encryptedFsrKey)
+	return nil
 }
 
 // Note recipient's filename can be different from the sender's filename.
@@ -369,30 +494,11 @@ func (userdata *User) ReceiveFile(filename string, sender string,
 	srUuidByte := combined[16:]
 	srUuid := bytesToUUID(srUuidByte)
 
-	//retrieve encrypted fsr key
-	encryptedFsrKey,_ := userlib.DatastoreGet(encryptedFsrKeyUuid)
-
-	//decrypt encrypted fsr key
-	fsrKey,_ := userlib.PKEDec(userdata.PrivateKey, encryptedFsrKey)
-
-	//retrieve secured fsr
-	securedFsr,_ := userlib.DatastoreGet(srUuid)
-	var sharingRecord SharingRecord
-	decryptedSR := userlib.SymDec(fsrKey, securedFsr[64:])
-	json.Unmarshal(decryptedSR, &sharingRecord)
-
-	//check sr hmac
-	receivedHmac,_ := userlib.HMACEval(sharingRecord.HmacKey, securedFsr[64:])
-	if !userlib.HMACEqual(securedFsr[:64], receivedHmac){
-		return errors.New("hmac not equal")
-	}
-
 	//write file to userdata
-	var file File
-	file.HmacKey = sharingRecord.FileHmacKey
-	file.Uuid = sharingRecord.FileUuid
-	file.SymmeticKey = sharingRecord.FileSymmetricKey
-	userdata.Files[filename] = file
+	var userFile UserFile
+	userFile.FsrUuid = srUuid
+	userFile.FsrKeyUuid = encryptedFsrKeyUuid
+	userdata.Files[filename] = userFile
 
 	//encrypt userdata
 	jsonUserdata,_ := json.Marshal(userdata)
@@ -411,6 +517,46 @@ func (userdata *User) ReceiveFile(filename string, sender string,
 
 // Removes target user's access.
 func (userdata *User) RevokeFile(filename string, target_username string) (err error) {
+
+	////retrieve file information
+	//file := userdata.Files[filename]
+	//fileUuid := file.Uuid
+	//
+	////retrieve secured file from datastore
+	//securedFile,_ := userlib.DatastoreGet(fileUuid)
+	//hmac := securedFile[:64]
+	//encryptedData := securedFile[64:]
+	//
+	////check if file is corrupted
+	//receivedHmac,_ := userlib.HMACEval(file.HmacKey, encryptedData)
+	//if !userlib.HMACEqual(hmac, receivedHmac) {
+	//	return errors.New("file corrupted")
+	//}
+	//
+	////decrypt encrypted file
+	//rawFileData := userlib.SymDec(file.SymmetricKey, encryptedData)
+	//var fileData FileData
+	//json.Unmarshal(rawFileData, &fileData)
+	//
+	//
+	////update shares in file information
+	//var shares []Share
+	//for i := 0; i < len(fileData.Shares); i++ {
+	//	if fileData.Shares[i].Sender != target_username && fileData.Shares[i].Recipient != target_username {
+	//		shares = append(shares, fileData.Shares[i])
+	//	}
+	//}
+	//
+	//// store updated file data
+	//rawFileData,_ = json.Marshal(fileData)
+	//
+	////encrypt file data with symmetric key
+	//encryptedFile := userlib.SymEnc(file.SymmetricKey, userlib.RandomBytes(16), rawFileData)
+	//hmacFile,_ := userlib.HMACEval(file.HmacKey, encryptedFile)
+	//secured := append(hmacFile, encryptedFile...)
+	//
+	////store file to datastore
+	//userlib.DatastoreSet(fileUuid, secured)
 
 	return
 }
