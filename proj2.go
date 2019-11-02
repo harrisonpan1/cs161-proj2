@@ -310,54 +310,69 @@ func (userdata *User) StoreFile(filename string, data []byte) {
 // metadata you need.
 
 func (userdata *User) AppendFile(filename string, data []byte) (err error) {
-	//
-	////retrieve file information from filename
-	//userFile := userdata.Files[filename]
-	//fsrKeyUuid := userFile.FsrKeyUuid
-	//fsrUuid := userFile.FsrUuid
-	//
-	////retrieve encrypted fsr key
-	//encryptedFsrKey,_ := userlib.DatastoreGet(fsrKeyUuid)
-	//
-	////decrypt encrypted fsr key
-	//fsrKey,_ := userlib.PKEDec(userdata.PrivateKey, encryptedFsrKey)
-	//
-	////retrieve secured fsr
-	//securedFsr,_ := userlib.DatastoreGet(fsrUuid)
-	//
-	//var sharingRecord SharingRecord
-	//decryptedSR := userlib.SymDec(fsrKey, securedFsr[64:])
-	//json.Unmarshal(decryptedSR, &sharingRecord)
-	//
-	//
-	////check sr hmac
-	//receivedHmac,_ := userlib.HMACEval(sharingRecord.HmacKey, securedFsr[64:])
-	//if !userlib.HMACEqual(securedFsr[:64], receivedHmac){
-	//	return errors.New("hmac not equal")
-	//}
-	//
-	////retrieve filedata from datastore
-	//securedFileData,_ := userlib.DatastoreGet(sharingRecord.FileUuid)
-	//encryptedData := securedFileData[64:]
-	//hmac := securedFileData[:64]
-	//
-	////check if file is corrupted
-	//receivedFileDataHmac,_ := userlib.HMACEval(sharingRecord.FileHmacKey, encryptedData)
-	//if !userlib.HMACEqual(hmac, receivedFileDataHmac) {
-	//	return errors.New("file corrupted")
-	//}
-	//
-	////decrypt encrypted file
-	//rawFileData := userlib.SymDec(sharingRecord.FileSymmetricKey, encryptedData)
-	//var fileData FileData
-	//json.Unmarshal(rawFileData, &fileData)
-	//
-	//fileData.Appends = append(fileData.Appends, len(data))
-	//newEncFileData := userlib.SymEnc(sharingRecord.FileSymmetricKey, userlib.RandomBytes(16), data)
-	//newHmac := userlib.HMACEval(sharingRecord.FileHmacKey, encryptedData, )
 
-	// in order to append without decrypting, we need to encrypt the data portion of the file independently from
-	// metadata portion.
+	//retrieve file information from filename
+	userFile := userdata.Files[filename]
+	fsrKeyUuid := userFile.FsrKeyUuid
+	fsrUuid := userFile.FsrUuid
+
+	//retrieve encrypted fsr key
+	encryptedFsrKey,_ := userlib.DatastoreGet(fsrKeyUuid)
+
+	//decrypt encrypted fsr key
+	fsrKey,_ := userlib.PKEDec(userdata.PrivateKey, encryptedFsrKey)
+
+	//retrieve secured fsr
+	securedFsr,_ := userlib.DatastoreGet(fsrUuid)
+
+	var sharingRecord SharingRecord
+	decryptedSR := userlib.SymDec(fsrKey, securedFsr[64:])
+	json.Unmarshal(decryptedSR, &sharingRecord)
+
+	//check sr hmac
+	receivedHmac,_ := userlib.HMACEval(sharingRecord.HmacKey, securedFsr[64:])
+	if !userlib.HMACEqual(securedFsr[:64], receivedHmac){
+		return errors.New("hmac not equal")
+	}
+
+	//retrieve filedata from datastore
+	marshalledFileData,_ := userlib.DatastoreGet(sharingRecord.FileUuid)
+	var fileData FileData
+	json.Unmarshal(marshalledFileData, &fileData)
+
+	encryptedMetaData := fileData.MetaData[64:]
+	encryptedMetaDataHmac := fileData.MetaData[:64]
+
+	//check if metadata is corrupted
+	receivedMetaDataHmac,_ := userlib.HMACEval(sharingRecord.FileHmacKey, encryptedMetaData)
+	if !userlib.HMACEqual(encryptedMetaDataHmac, receivedMetaDataHmac) {
+		return errors.New("file metadata corrupted")
+	}
+
+	//decrypt encrypted metadata
+	marshalledMetaData := userlib.SymDec(sharingRecord.FileSymmetricKey, encryptedMetaData)
+	var metaData MetaData
+	json.Unmarshal(marshalledMetaData, &metaData)
+
+	//encrypt newly appended data
+	appendedEncData := userlib.SymEnc(sharingRecord.FileSymmetricKey, userlib.RandomBytes(16), data)
+	appendedHmac,_ := userlib.HMACEval(sharingRecord.FileHmacKey, appendedEncData)
+	appendedSecureData := append(appendedHmac, appendedEncData...)
+	fileData.Data = append(fileData.Data, appendedSecureData...)
+	metaData.Appends = append(metaData.Appends, len(appendedSecureData))
+
+	//encrypt file metadata with symmetric key
+	updatedMarshalledMetaData,_ := json.Marshal(metaData)
+	updatedEncMetaData := userlib.SymEnc(sharingRecord.FileSymmetricKey, userlib.RandomBytes(16), updatedMarshalledMetaData)
+	updatedHmacMetaData,_ := userlib.HMACEval(sharingRecord.FileHmacKey, updatedEncMetaData)
+	securedMetaData := append(updatedHmacMetaData, updatedEncMetaData...)
+
+	//update file data
+	fileData.MetaData = securedMetaData
+	updatedMarshalledFileData,_ := json.Marshal(fileData)
+
+	//store file to datastore
+	userlib.DatastoreSet(sharingRecord.FileUuid, updatedMarshalledFileData)
 
 	return
 }
@@ -431,7 +446,6 @@ func (userdata *User) LoadFile(filename string) (data []byte, err error) {
 	}
 
 	data = decryptedData
-
 	return data, nil
 }
 
