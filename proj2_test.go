@@ -4,6 +4,7 @@ package proj2
 // imports it will break the autograder, and we will be Very Upset.
 
 import (
+	"encoding/hex"
 	_ "encoding/hex"
 	_ "encoding/json"
 	_ "errors"
@@ -46,10 +47,14 @@ func TestStorage(t *testing.T) {
 	t.Log("Loaded user", u)
 
 	v := []byte("This is a test")
+	t.Log("starting to store file")
 	u.StoreFile("file1", v)
+	t.Log("file store complete")
 
 
+	t.Log("starting to loaf file")
 	v2, err2 := u.LoadFile("file1")
+	t.Log("file load complete")
 	if err2 != nil {
 		t.Error("Failed to upload and download", err2)
 		return
@@ -100,5 +105,57 @@ func TestShare(t *testing.T) {
 		t.Error("Shared file is not the same", v, v2)
 		return
 	}
+}
+
+func TestUser_RevokeFile(t *testing.T) {
+	u, err := GetUser("alice", "fubar")
+	if err != nil {
+		t.Error("Failed to reload user", err)
+		return
+	}
+
+	var v, v2, v3 []byte
+
+	v, err = u.LoadFile("file1")
+	if err != nil {
+		t.Error("Failed to download the file from alice", err)
+		return
+	}
+
+	u2, err := GetUser("bob", "foobar")
+	if err != nil {
+		t.Error("Failed to reload user", err)
+		return
+	}
+
+	v2, err = u2.LoadFile("file2")
+	if err != nil {
+		t.Error("Failed to download the file from bob", err)
+		return
+	}
+	if !reflect.DeepEqual(v, v2) {
+		t.Error("Shared file is initially not the same", v, v2)
+		return
+	}
+
+	err = u.RevokeFile("file1", "bob")
+	if err != nil {
+		t.Error("Failed to revoke file", err)
+		return
+	}
+
+	v3, err = u2.LoadFile("file2")
+	t.Log("alice's file is: " + hex.EncodeToString(v))
+	t.Log("bob's file is: " + hex.EncodeToString(v2))
+	t.Log("bob's file after revocation: " + hex.EncodeToString(v3))
+	if err == nil {
+		t.Error("Can still download the file from bob", err)
+		return
+	}
+	if reflect.DeepEqual(v, v3) {
+		t.Error("Shared file is still the same", v, v3)
+		return
+	}
+
 
 }
