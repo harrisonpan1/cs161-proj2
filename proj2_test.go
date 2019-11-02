@@ -107,6 +107,32 @@ func TestShare(t *testing.T) {
 	}
 }
 
+func TestUser_AppendFile(t *testing.T) {
+	u, err := GetUser("alice", "fubar")
+	v,_ := u.LoadFile("file1")
+	if err != nil {
+		t.Error("Failed to download the file from alice", err)
+		return
+	}
+	err = u.AppendFile("file1", []byte("helloworld"))
+	if err != nil {
+		t.Error("Failed to append file", err)
+		return
+	}
+	v2,_ := u.LoadFile("file1")
+	if err != nil {
+		t.Error("Failed to download the file from alice", err)
+		return
+	}
+	t.Log("initial file is: " + hex.EncodeToString(v))
+	t.Log("appended file is: " + hex.EncodeToString([]byte("helloworld")))
+	t.Log("final file is: " + hex.EncodeToString(v2))
+	if !reflect.DeepEqual(append(v, []byte("helloworld")...), v2) {
+		t.Error("Appending wrong", v, v2)
+		return
+	}
+}
+
 func TestUser_RevokeFile(t *testing.T) {
 	u, err := GetUser("alice", "fubar")
 	if err != nil {
